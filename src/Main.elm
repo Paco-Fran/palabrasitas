@@ -1,6 +1,6 @@
 port module Main exposing (..)
 
-import Browser exposing (Document)
+import Browser
 import Browser.Events exposing (onKeyDown, onResize)
 import Element
     exposing
@@ -39,7 +39,7 @@ import Element.Border as Border exposing (rounded)
 import Element.Events exposing (onClick)
 import Element.Font as Font
 import Element.Input exposing (button)
-import Html exposing (Html)
+import Html
 import Json.Decode as D
 import Json.Encode as E
 import Set exposing (Set)
@@ -65,6 +65,7 @@ type alias Model =
     , showSettings : Bool
     , useDarkMode : Bool
     , useContrastMode : Bool
+    , useLargeKeyboard : Bool
     , statistics : Statistics
     , wordSize : Int
     }
@@ -128,6 +129,7 @@ type Msg
     | ShowSettings Bool
     | SetDarkMode Bool
     | SetContrastMode Bool
+    | SetLargeKeyboard Bool
     | None
 
 
@@ -173,27 +175,13 @@ port makeToast : (String -> msg) -> Sub msg
 
 view : Model -> Html.Html Msg
 view model =
-    let
-        titleText =
-            case language of
-                Dutch ->
-                    titel model ++ " | Elke dag een nieuwe puzzel"
-
-                English ->
-                    "WORDLE6 | Six letter Wordle"
-
-                Spanish ->
-                    "Palabrasitas6 | rompecabezas de seis letras"
-
-
-    in
     Element.layout
         [ Background.color (pageBackground model)
         , Font.color (textColor model)
         , height (px model.window.height)
         , width (px model.window.width)
         , inFront (maybeViewHelp model)
-        , inFront (maybeShowSettings model)
+        , inFront (maybeViewSettings model)
         , inFront (maybeViewEndScreen model)
         , inFront (viewToasts model)
         ]
@@ -229,7 +217,6 @@ exampleWords model =
 
                 Spanish ->
                     [ New 'S', Place 'U', New 'R', New 'F', New 'E', New 'N' ]
-
             , case language of
                 English ->
                     [ New 'A', New 'N', New 'S', New 'W', Wrong 'E', New 'R' ]
@@ -240,8 +227,6 @@ exampleWords model =
                 Spanish ->
                     [ New 'C', New 'H', New 'I', New 'Q', New 'U', Wrong 'E' ]
             )
-
-
 
 
 viewHelp : Model -> Element Msg
@@ -411,8 +396,11 @@ viewKeyboard model =
     let
         ( first, second, third ) =
             model.keyboard
+
+        maxHeight =
+            0.3 * toFloat model.window.height |> min 260 |> round
     in
-    column [ width fill, height (fill |> maximum 260), alignBottom, spacing 10, paddingXY 5 5 ]
+    column [ width fill, height (fill |> maximum maxHeight), alignBottom, spacing 10, paddingXY 5 5 ]
         [ row [ width fill, height fill, spacing 5, centerX ] (first |> List.map (viewKey model))
         , row [ width fill, height fill, spacing 5, centerX ] (second |> List.map (viewKey model))
         , row [ width fill, height fill, spacing 5, centerX ]
@@ -441,16 +429,38 @@ viewKey model letter =
                 Wrong x ->
                     ( wrongColor model, x )
 
-        ( buttontext, bwidth ) =
-            case c of
-                '↵' ->
-                    ( el [ Font.size 14 ] (text "ENTER"), 85 )
+        ( buttontext, bwidth, fontSize ) =
+            case ( c, model.useLargeKeyboard ) of
+                ( '↵', False ) ->
+                    ( text "ENTER", 85, 14 )
 
-                x ->
-                    ( text (charToString x), 55 )
+                ( '↵', True ) ->
+                    ( text "ENTER"
+                    , 85
+                    , case (classifyDevice model.window).class of
+                        Phone ->
+                            14
+
+                        _ ->
+                            20
+                    )
+
+                ( x, False ) ->
+                    ( text (charToString (Char.toLower x)), 55, 18 )
+
+                ( x, True ) ->
+                    ( text (charToString (Char.toUpper x))
+                    , 55
+                    , case (classifyDevice model.window).class of
+                        Phone ->
+                            22
+
+                        _ ->
+                            30
+                    )
     in
-    button [ Background.color bgColor, Element.mouseDown [ Background.color (darken bgColor) ], width (fill |> maximum bwidth), height (keyDeviceHeight model), rounded 10, Font.size 18 ]
-        { onPress = Just (TouchKey c), label = el [ centerX, centerY ] buttontext }
+    button [ Background.color bgColor, Element.mouseDown [ Background.color (darken bgColor) ], width (fill |> maximum bwidth), height fill, rounded 10, Font.size fontSize ]
+        { onPress = Just (TouchKey (Char.toLower c)), label = el [ centerX, centerY ] buttontext }
 
 
 boardWordToJsonString : Maybe BoardWord -> E.Value
@@ -582,6 +592,7 @@ modelToJson model =
           )
         , ( "darkTheme", E.bool model.useDarkMode )
         , ( "colorBlindTheme", E.bool model.useContrastMode )
+        , ( "largeKeyboard", E.bool model.useLargeKeyboard )
         , ( "statistics" ++ storageSuffix model, statisticsToJson model.statistics )
         ]
         |> E.encode 0
@@ -700,10 +711,22 @@ getStatistics =
         (D.field "gamesWon" D.int)
 
 
+type alias UISettings =
+    { darkTheme : Maybe Bool, colorBlindTheme : Maybe Bool, largeKeyboard : Maybe Bool }
+
+
+getUISettings : D.Decoder UISettings
+getUISettings =
+    D.map3 UISettings
+        (D.maybe (D.field "darkTheme" D.bool))
+        (D.maybe (D.field "colorBlindTheme" D.bool))
+        (D.maybe (D.field "largeKeyboard" D.bool))
+
+
 modelDecoder : Int -> String -> D.Decoder Model
 modelDecoder wordSize todaysWord =
-    D.map8
-        (\( bs, e ) s state lastPlayed lastCompleted darkTheme colorBlindTheme statistics ->
+    D.map7
+        (\( bs, e ) s state lastPlayed lastCompleted uiSettings statistics ->
             let
                 ( startBoard, playState ) =
                     if s == todaysWord then
@@ -728,8 +751,9 @@ modelDecoder wordSize todaysWord =
             , offset = 0
             , showHelp = False
             , showSettings = False
-            , useDarkMode = darkTheme |> Maybe.withDefault False
-            , useContrastMode = colorBlindTheme |> Maybe.withDefault False
+            , useDarkMode = uiSettings.darkTheme |> Maybe.withDefault False
+            , useContrastMode = uiSettings.colorBlindTheme |> Maybe.withDefault False
+            , useLargeKeyboard = uiSettings.largeKeyboard |> Maybe.withDefault False
             , statistics = statistics |> Maybe.withDefault emptyStatistics
             , wordSize = 5
             }
@@ -739,8 +763,7 @@ modelDecoder wordSize todaysWord =
         (D.field "gameState" getGameStatus)
         (D.field "gameState" getLastPlayed)
         (D.field "gameState" getLastCompleted)
-        (D.maybe (D.field "darkTheme" D.bool))
-        (D.maybe (D.field "colorBlindTheme" D.bool))
+        getUISettings
         (D.maybe (D.field "statistics" getStatistics))
 
 
@@ -795,6 +818,7 @@ modelFromJson inp wordSize todaysWord startDarkMode =
             , showSettings = False
             , useDarkMode = startDarkMode
             , useContrastMode = False
+            , useLargeKeyboard = False
             , statistics = emptyStatistics
             , wordSize = 5
             }
@@ -859,7 +883,6 @@ createShare model =
 
                         Spanish ->
                             ( "Palabrasitas" ++ String.fromInt l ++ " ", 1 )
-
     in
     woordle ++ String.fromInt (model.offset + extraOffset) ++ " " ++ n ++ "/6\n\n" ++ blokjes model model.board
 
@@ -951,6 +974,9 @@ update msg model =
 
                 SetContrastMode x ->
                     { model | useContrastMode = x }
+
+                SetLargeKeyboard x ->
+                    { model | useLargeKeyboard = x }
 
                 None ->
                     model
@@ -1385,10 +1411,10 @@ rowHeight model width =
     round <| (toFloat width - 4 * toFloat (model.wordSize - 1)) / toFloat model.wordSize
 
 
-maybeShowSettings : Model -> Element Msg
-maybeShowSettings model =
+maybeViewSettings : Model -> Element Msg
+maybeViewSettings model =
     if model.showSettings then
-        viewShowSettings model
+        viewSettings model
 
     else
         Element.none
@@ -1414,8 +1440,8 @@ onOffButton model msg state =
         { label = text txt, onPress = Just msg }
 
 
-viewShowSettings : Model -> Element Msg
-viewShowSettings model =
+viewSettings : Model -> Element Msg
+viewSettings model =
     let
         ( w, h ) =
             calcWinScreenWH model.window
@@ -1454,7 +1480,6 @@ viewShowSettings model =
                             , newTabLink [ Font.color linkColor ] { label = text "gewone WOORDLE", url = "/" }
                             , text " geprobeerd?"
                             ]
-
     in
     el [ Background.color darkened_bg, centerX, centerY, width fill, height fill ]
         (column
@@ -1477,9 +1502,11 @@ viewShowSettings model =
                 , el [ height (px 10) ] Element.none
                 , row [ width fill, spaceEvenly ] [ paragraph [] [ text "Hoog contrast vakjes" ], onOffButton model (SetContrastMode (not model.useContrastMode)) model.useContrastMode ]
                 , el [ height (px 10) ] Element.none
+                , el [ height (px 10) ] Element.none
+                , row [ width fill, spaceEvenly ] [ paragraph [] [ text "Grotere toetsenbord letters" ], onOffButton model (SetLargeKeyboard (not model.useLargeKeyboard)) model.useLargeKeyboard ]
+                , el [ height (px 10) ] Element.none
                 , el [ Border.width 1, width fill ] Element.none
                 , el [ height (px 10) ] Element.none
-                , paragraph [] [ text "Feedback: ", newTabLink [ Font.color linkColor ] { url = "https://twitter.com/pingiun_", label = text "yele op Twitter" } ]
                 , case language of
                     English ->
                         paragraph [] [ Element.text "Based on ", newTabLink [ Font.color linkColor ] { url = "https://www.powerlanguage.co.uk/wordle/", label = Element.text "WORDLE by Josh Wardle" } ]
@@ -1489,8 +1516,8 @@ viewShowSettings model =
 
                     Spanish ->
                         Element.none
-
-                , paragraph [] [ text "Code is beschikbaar ", newTabLink [ Font.color linkColor ] { url = "https://github.com/pingiun/woordle/", label = text "op GitHub" } ]
+                , paragraph [] [ text "Code is beschikbaar ", newTabLink [ Font.color linkColor ] { url = "https://github.com/Paco-Fran/palabrasitas", label = text "op GitHub" } ]
+                , paragraph [] [ Element.text "Creado originalmente por ", newTabLink [ Font.color linkColor ] { url = "https://github.com/pingiun/woordle", label = text "yele" } ]
                 , linkToOther
                 ]
             ]
@@ -1615,12 +1642,14 @@ viewEndScreen model =
                             , newTabLink [ Font.color linkColor ] { label = text "WOORDLE6", url = "/woordle6" }
                             , text " geprobeerd?"
                             ]
+
                     else
                         paragraph [ Font.size 16 ]
                             [ text "Ook al "
                             , newTabLink [ Font.color linkColor ] { label = text "gewone WOORDLE", url = "/" }
                             , text " geprobeerd?"
                             ]
+
                 Spanish ->
                     if model.wordSize == 5 then
                         paragraph [ Font.size 16 ]
@@ -1628,7 +1657,8 @@ viewEndScreen model =
                             , newTabLink [ Font.color linkColor ] { label = text "WOORDLE6", url = "/palabrasitas6" }
                             , text " geprobeerd?"
                             ]
-                     else
+
+                    else
                         paragraph [ Font.size 16 ]
                             [ text "Ook al "
                             , newTabLink [ Font.color linkColor ] { label = text "gewone WOORDLE", url = "/" }
@@ -1670,7 +1700,6 @@ viewEndScreen model =
 
                     Spanish ->
                         Element.none
-
                 , linkToOther
                 ]
             ]
@@ -1781,15 +1810,6 @@ fillList list to =
 charToString : Char -> String
 charToString =
     List.singleton >> String.fromList
-
-
-keyDeviceHeight : { a | window : { window | height : Int, width : Int } } -> Element.Length
-keyDeviceHeight model =
-    if (classifyDevice model.window).class == Element.Phone then
-        fill |> maximum 50
-
-    else
-        px 65
 
 
 white : Element.Color
@@ -2086,7 +2106,14 @@ text str =
                     "Can't share" ->
                         "Can't share"
 
+                    other ->
+                        -- Single letters can be kept untranslated
+                        if String.length other == 1 then
+                            other
 
+                        else
+                            -- Fallback to the original string
+                            other
 
         Spanish ->
             Element.text <|
@@ -2096,6 +2123,9 @@ text str =
 
                     "..." ->
                         "..."
+
+                    "WOORDLE" ->
+                        "Palabrasitas"
 
                     "WOORDLE6" ->
                         "Palabrasitas6"
@@ -2201,14 +2231,12 @@ text str =
 
                     "Ook al " ->
                         "Has probado "
-                    
+
                     " geprobeerd?" ->
                         " tambien?"
 
                     "gewone WOORDLE" ->
                         "Palabrasitas regular"
-
-
 
                     other ->
                         -- Single letters can be kept untranslated
